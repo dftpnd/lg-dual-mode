@@ -1,0 +1,15 @@
+[package]
+name = "lg-dual-mode"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "lg-dual-mode"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+strip = true
+opt-level = "s"

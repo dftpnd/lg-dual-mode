@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
 
-use crate::edid::EDID_BLOCK_LEN;
+use crate::edid::{self, EDID_BLOCK_LEN};
 
 const I2C_SLAVE: libc::c_ulong = 0x0703;
 const EDID_ADDRESS: u16 = 0x50;
@@ -40,27 +40,48 @@ pub fn set_vcp_packet(opcode: u8, value: u16) -> [u8; 7] {
 }
 
 pub fn find_bus(connector_edid: &[u8]) -> Result<Bus, String> {
-    let mut paths: Vec<PathBuf> = (0..64)
-        .map(|n| PathBuf::from(format!("/dev/i2c-{n}")))
-        .filter(|p| p.exists())
-        .collect();
-    paths.sort();
-
     let wanted = &connector_edid[..EDID_BLOCK_LEN];
     let mut denied = 0;
-    for path in paths {
+    for path in bus_paths() {
         match read_edid(&path) {
             Ok(edid) if edid == wanted => return Ok(Bus { path }),
             Err(BusError::PermissionDenied) => denied += 1,
             _ => {}
         }
     }
-    if denied > 0 {
-        return Err(format!(
-            "нет доступа к {denied} шинам i2c — добавь себя в группу i2c: sudo usermod -aG i2c $USER"
-        ));
+    Err(missing_bus(denied))
+}
+
+pub fn find_dual_mode_monitor() -> Result<(Bus, Vec<u8>), String> {
+    let mut denied = 0;
+    for path in bus_paths() {
+        match read_edid(&path) {
+            Ok(found) if edid::is_lg(&found) && edid::mode_of(&found).is_some() => {
+                return Ok((Bus { path }, found));
+            }
+            Err(BusError::PermissionDenied) => denied += 1,
+            _ => {}
+        }
     }
-    Err("шина i2c этого монитора не найдена".to_string())
+    Err(missing_bus(denied))
+}
+
+fn bus_paths() -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = (0..64)
+        .map(|n| PathBuf::from(format!("/dev/i2c-{n}")))
+        .filter(|p| p.exists())
+        .collect();
+    paths.sort();
+    paths
+}
+
+fn missing_bus(denied: usize) -> String {
+    if denied > 0 {
+        return format!(
+            "нет доступа к {denied} шинам i2c — добавь себя в группу i2c: sudo usermod -aG i2c $USER"
+        );
+    }
+    "шина i2c этого монитора не найдена".to_string()
 }
 
 pub fn send_set_vcp(bus: &Bus, opcode: u8, value: u16) -> Result<(), String> {

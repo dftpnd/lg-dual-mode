@@ -41,8 +41,8 @@ fn main() -> ExitCode {
 }
 
 fn run(command: &str) -> Result<String, String> {
-    let connector = edid::find_connector()?;
-    let current = edid::mode_of(&connector.edid)
+    let monitor = locate()?;
+    let current = edid::mode_of(&monitor.edid)
         .ok_or_else(|| "не удалось определить текущий режим".to_string())?;
 
     let wanted = match command {
@@ -51,7 +51,7 @@ fn run(command: &str) -> Result<String, String> {
                 "{} — {} ({})",
                 current.name(),
                 current.description(),
-                connector.name
+                monitor.name
             ));
         }
         "wide" => Mode::FullWide,
@@ -65,10 +65,37 @@ fn run(command: &str) -> Result<String, String> {
         return Ok(format!("уже {} — {}", wanted.name(), wanted.description()));
     }
 
-    let bus = ddc::find_bus(&connector.edid)?;
+    let bus = ddc::find_bus(&monitor.edid)?;
     ddc::send_set_vcp(&bus, DUAL_MODE_OPCODE, value_for(wanted))?;
     await_mode(wanted)?;
     Ok(format!("{} — {}", wanted.name(), wanted.description()))
+}
+
+struct Monitor {
+    name: String,
+    edid: Vec<u8>,
+}
+
+fn locate() -> Result<Monitor, String> {
+    prefer(
+        edid::find_connector().map(|connector| Monitor {
+            name: connector.name,
+            edid: connector.edid,
+        }),
+        || {
+            ddc::find_dual_mode_monitor().map(|(bus, edid)| Monitor {
+                name: format!("{}, DRM отдаёт чужой EDID", bus.path.display()),
+                edid,
+            })
+        },
+    )
+}
+
+fn prefer<T>(
+    primary: Result<T, String>,
+    fallback: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    primary.or_else(|drm| fallback().map_err(|i2c| format!("{drm}; по i2c тоже: {i2c}")))
 }
 
 fn value_for(mode: Mode) -> u16 {
@@ -83,8 +110,8 @@ fn await_mode(wanted: Mode) -> Result<(), String> {
     let deadline = Instant::now() + APPLY_TIMEOUT;
     while Instant::now() < deadline {
         sleep(POLL_INTERVAL);
-        if let Ok(connector) = edid::find_connector() {
-            if edid::mode_of(&connector.edid) == Some(wanted) {
+        if let Ok(monitor) = locate() {
+            if edid::mode_of(&monitor.edid) == Some(wanted) {
                 return Ok(());
             }
         }
@@ -104,5 +131,24 @@ mod tests {
     fn encodes_off_group_values_from_the_decompiled_source() {
         assert_eq!(value_for(Mode::FullWide), 0x2200);
         assert_eq!(value_for(Mode::SixteenNine), 0x2201);
+    }
+
+    #[test]
+    fn drm_answer_wins_without_touching_i2c() {
+        let found = prefer(Ok(1), || -> Result<i32, String> { panic!("i2c не нужен") });
+        assert_eq!(found, Ok(1));
+    }
+
+    #[test]
+    fn i2c_rescues_when_drm_shows_a_stub_edid() {
+        let found = prefer(Err("не найден".to_string()), || Ok(2));
+        assert_eq!(found, Ok(2));
+    }
+
+    #[test]
+    fn both_reasons_are_kept_when_nothing_is_found() {
+        let found: Result<i32, String> =
+            prefer(Err("не найден".to_string()), || Err("шина не найдена".to_string()));
+        assert_eq!(found, Err("не найден; по i2c тоже: шина не найдена".to_string()));
     }
 }
